@@ -93,9 +93,25 @@ def load_schools() -> pd.DataFrame:
 
 
 def load_or_init_db(schools: pd.DataFrame) -> dict[str, dict]:
+    """Lädt makerspaces.json.
+    * Alte Listenstruktur (\[{...}] ) wird in das neue Dict-Format umgewandelt (1. Element).
+    * Falls Datei fehlt, Skeleton mit leeren Dicts.
+    """
     if SPACE_FILE.exists():
-        return json.loads(SPACE_FILE.read_text())
-    # Skeleton erzeugen
+        raw = json.loads(SPACE_FILE.read_text())
+        migrated: dict[str, dict] = {}
+        for k, v in raw.items():
+            if isinstance(v, list):  # altes Schema → nimm ersten Eintrag oder leeres Dict
+                migrated[k] = v[0] if v else {}
+            elif isinstance(v, dict):
+                migrated[k] = v
+            else:
+                migrated[k] = {}
+        # Speichern, falls Migration stattfand
+        if migrated != raw:
+            SPACE_FILE.write_text(json.dumps(migrated, ensure_ascii=False, indent=2))
+        return migrated
+    # Datei fehlt: Skeleton
     db = {row["name"]: {} for _, row in schools.iterrows()}
     SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
     return db
