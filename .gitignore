@@ -1,0 +1,11 @@
+# Bytecode & Cache
+__pycache__/
+*.py[cod]
+
+# IDEs / OS
+.vscode/
+.DS_Store
+
+# lokale Datenfiles (werden neu erzeugt)
+schools_bavaria.csv
+makerspaces.json
