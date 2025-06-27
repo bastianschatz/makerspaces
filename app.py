@@ -247,5 +247,5 @@ else:
     if st.session_state.get("map_key") != key:
         st.session_state["map_obj"] = build_map(filtered_df, db)
         st.session_state["map_key"] = key
-    st_folium(st.session_state["map_obj"], width=1280, height=650)
+    st_foliumst_folium(st.session_state["map_obj"], width=1280, height=650)
 (st.session_state["map_obj"], width=1280, height=650)
