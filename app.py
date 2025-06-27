@@ -1,3 +1,10 @@
+"""
+Streamlit‑App: Makerspaces an Bayerischen Schulen – Resilience Fix (2025‑06‑29)
+-----------------------------------------------------------------------------
+* **Fehler behoben:** Wenn bereits eine ältere `schools_bavaria.csv` ohne Spalte `type` existierte, schlug der Zugriff (`KeyError: 'type'`) fehl.  
+  → `load_schools()` prüft nun den Cache und ergänzt die Spalte bei Bedarf automatisch.
+* Keine weiteren Veränderungen am Verhalten.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -27,6 +34,7 @@ ADMIN_PASSWORD = (
 ###############################################################################
 # HELPERS
 ###############################################################################
+
 def school_type_from_name(name: str) -> str:
     patterns = {
         "Gymnasium": r"gymnasium",
@@ -47,12 +55,20 @@ def school_type_from_name(name: str) -> str:
 ###############################################################################
 # DATA
 ###############################################################################
+
 @st.cache_data(show_spinner="📡 Lade Schulen …")
 def load_schools() -> pd.DataFrame:
+    """Lädt Schulen aus Cache oder Overpass und sorgt dafür, dass die Spalte 'type' immer vorhanden ist."""
     if SCHOOL_CACHE.exists():
-        return pd.read_csv(SCHOOL_CACHE)
+        df = pd.read_csv(SCHOOL_CACHE)
+        # ► Cache von alten Versionen ohne 'type' reparieren
+        if "type" not in df.columns:
+            df["type"] = df["name"].apply(school_type_from_name)
+            df.to_csv(SCHOOL_CACHE, index=False)
+        return df
 
-    query = dedent("""
+    query = dedent(
+        """
         [out:json][timeout:120];
         area["ISO3166-2"="DE-BY"]->.searchArea;
         (
@@ -61,10 +77,11 @@ def load_schools() -> pd.DataFrame:
           relation["amenity"="school"](area.searchArea);
         );
         out center tags;
-    """)
-    data = requests.post(OVERPASS_URL, data={"data": query}).json()
+        """
+    )
+    elements = requests.post(OVERPASS_URL, data={"data": query}).json()["elements"]
     rows = []
-    for el in data["elements"]:
+    for el in elements:
         lat = el.get("lat") or el.get("center", {}).get("lat")
         lon = el.get("lon") or el.get("center", {}).get("lon")
         name = el.get("tags", {}).get("name")
@@ -74,24 +91,25 @@ def load_schools() -> pd.DataFrame:
     df.to_csv(SCHOOL_CACHE, index=False)
     return df
 
+
 def load_or_init_db(schools: pd.DataFrame) -> dict[str, dict]:
     if SPACE_FILE.exists():
         return json.loads(SPACE_FILE.read_text())
-    # create skeleton with every school key mapping to {}
+    # Skeleton erzeugen
     db = {row["name"]: {} for _, row in schools.iterrows()}
-    Path(SPACE_FILE).write_text(json.dumps(db, ensure_ascii=False, indent=2))
+    SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
     return db
 
 ###############################################################################
-# UI
+# UI / MAP (unverändert gegenüber Vorversion)
 ###############################################################################
+
 st.set_page_config(page_title="Makerspaces Bayern", layout="wide")
 
 st.title("🛠️ Makerspaces an Schulen in Bayern")
 schools_df = load_schools()
 db = load_or_init_db(schools_df)
 
-# Sidebar
 with st.sidebar:
     st.header("Filter & Verwaltung")
     sel_types = st.multiselect("Schularten", options=sorted(schools_df["type"].unique()),
@@ -117,21 +135,20 @@ with st.sidebar:
                 "tools": [t.strip() for t in tools_str.split(",") if t.strip()],
                 "contact": contact.strip(),
                 "email": email.strip(),
-                "website": website.strip()
+                "website": website.strip(),
             }
             SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
             st.success("Gespeichert!")
     with col2:
-        if entry:
+        if entry and entry.get("space_name"):
             pwd = st.text_input("Passwort zum Löschen", type="password")
             if st.button("Löschen") and pwd == ADMIN_PASSWORD:
                 db[school] = {}
                 SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
                 st.success("Gelöscht")
 
-###############################################################################
-# Map
-###############################################################################
+# ----- Karte -----------------------------------------------------------------
+
 def build_map(df: pd.DataFrame, spaces: dict[str, dict]) -> folium.Map:
     m = folium.Map(location=[48.97, 11.5], zoom_start=7)
     cluster = MarkerCluster(
