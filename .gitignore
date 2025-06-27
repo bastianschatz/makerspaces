@@ -9,3 +9,4 @@ __pycache__/
 # lokale Datenfiles (werden neu erzeugt)
 schools_bavaria.csv
 makerspaces.json
+schools_bavaria.csv # einmalig, falls noch nicht drin
