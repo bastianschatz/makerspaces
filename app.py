@@ -26,10 +26,20 @@ from streamlit_folium import st_folium
 SCHOOL_CACHE = Path("schools_bavaria.csv")
 SPACE_FILE = Path("makerspaces.json")
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-ADMIN_PASSWORD = (
-    st.secrets.get("makerspace_admin_pw", None)
-    or os.getenv("MAKERSPACE_ADMIN_PW", "changeme")
-)
+# --- Passwortbezug robust gestalten -----------------------------------------
+# ------------------------------------------------------------------
+# Admin-Passwort robust ermitteln
+#   1) Umgebungsvariable  MAKERSPACE_ADMIN_PW
+#   2) optional  .streamlit/secrets.toml   makerspace_admin_pw = "…"
+#   3) Fallback  "changeme"
+# ------------------------------------------------------------------
+_env_pw = os.getenv("MAKERSPACE_ADMIN_PW")       # höchste Priorität
+try:
+    _secret_pw = st.secrets["makerspace_admin_pw"]   # nur falls secrets.toml existiert
+except Exception:
+    _secret_pw = None
+
+ADMIN_PASSWORD = _env_pw or _secret_pw or "changeme"
 
 ###############################################################################
 # HELPERS
@@ -93,27 +103,42 @@ def load_schools() -> pd.DataFrame:
 
 
 def load_or_init_db(schools: pd.DataFrame) -> dict[str, dict]:
-    """Lädt makerspaces.json.
-    * Alte Listenstruktur (\[{...}] ) wird in das neue Dict-Format umgewandelt (1. Element).
-    * Falls Datei fehlt, Skeleton mit leeren Dicts.
+    """Stellt sicher, dass *jede* Schule im Makerspace-DB-Dict vertreten ist.
+
+    * liest bestehende `makerspaces.json` (altes oder neues Schema)
+    * migriert alte Listeneinträge → Dict (erster Eintrag)
+    * ergänzt **fehlende Schul-Schlüssel** mit `{}`
+    * speichert nur, falls Änderungen vorgenommen wurden
     """
+    changed = False
     if SPACE_FILE.exists():
         raw = json.loads(SPACE_FILE.read_text())
-        migrated: dict[str, dict] = {}
-        for k, v in raw.items():
-            if isinstance(v, list):  # altes Schema → nimm ersten Eintrag oder leeres Dict
-                migrated[k] = v[0] if v else {}
-            elif isinstance(v, dict):
-                migrated[k] = v
-            else:
-                migrated[k] = {}
-        # Speichern, falls Migration stattfand
-        if migrated != raw:
-            SPACE_FILE.write_text(json.dumps(migrated, ensure_ascii=False, indent=2))
-        return migrated
-    # Datei fehlt: Skeleton
-    db = {row["name"]: {} for _, row in schools.iterrows()}
-    SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
+    else:
+        raw = {}
+        changed = True
+
+    db: dict[str, dict] = {}
+
+    # 1) Migration alt → neu
+    for k, v in raw.items():
+        if isinstance(v, list):
+            db[k] = v[0] if v else {}
+            if isinstance(v, list):
+                changed = True
+        elif isinstance(v, dict):
+            db[k] = v
+        else:
+            db[k] = {}
+
+    # 2) Fehlende Schulen ergänzen
+    for name in schools["name"]:
+        if name not in db:
+            db[name] = {}
+            changed = True
+
+    if changed:
+        SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
+
     return db
 
 ###############################################################################
