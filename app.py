@@ -1,23 +1,10 @@
-"""
-Streamlit App – Makerspaces an bayerischen Gymnasien
-===================================================
-
-Version 2025‑06‑27‑c (Autofill‑Update)
--------------------------------------
-* **Autofill**: Wählt man ein Gymnasium, werden vorhandene Makerspace‑Infos (Name, Werkzeuge, Ansprechpartner) automatisch in die Eingabefelder geladen → bequemes Aktualisieren statt Neu­eingabe.
-* **Speichern‑Logik**: Ein Klick ersetzt den bisherigen Datensatz dieser Schule (statt ihn anzuhängen). Bei Schulen ohne Eintrag wird neu angelegt.
-* Cluster‑Farbe (grün/rot) + Ansprechpartner‑Popup bleiben unverändert.
-
-```bash
-pip install streamlit folium streamlit-folium pandas requests
-streamlit run app.py
-```
-"""
 from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
 import re
+from textwrap import dedent
 
 import pandas as pd
 import requests
@@ -26,160 +13,155 @@ import folium
 from folium.plugins import MarkerCluster, Fullscreen, LocateControl
 from streamlit_folium import st_folium
 
-# -----------------------------------------------------------------------------
+###############################################################################
 # CONFIGURATION
-# -----------------------------------------------------------------------------
+###############################################################################
 SCHOOL_CACHE = Path("schools_bavaria.csv")
 SPACE_FILE = Path("makerspaces.json")
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+ADMIN_PASSWORD = (
+    st.secrets.get("makerspace_admin_pw", None)
+    or os.getenv("MAKERSPACE_ADMIN_PW", "changeme")
+)
 
-# -----------------------------------------------------------------------------
-# DATA LAYER
-# -----------------------------------------------------------------------------
-@st.cache_data(show_spinner="📡 Lade Gymnasien aus OpenStreetMap …")
+###############################################################################
+# HELPERS
+###############################################################################
+def school_type_from_name(name: str) -> str:
+    patterns = {
+        "Gymnasium": r"gymnasium",
+        "Grundschule": r"grundschule",
+        "Realschule": r"realschule",
+        "Mittelschule": r"mittelschule|hauptschule",
+        "Berufsschule": r"berufsschule",
+        "FOS/BOS": r"fachoberschule|berufsoberschule|fos|bos",
+        "Wirtschaftsschule": r"wirtschaftsschule",
+        "Förderschule": r"förderschule|sonderpädagogisch",
+    }
+    low = name.lower()
+    for t, pat in patterns.items():
+        if re.search(pat, low):
+            return t
+    return "Sonstige"
+
+###############################################################################
+# DATA
+###############################################################################
+@st.cache_data(show_spinner="📡 Lade Schulen …")
 def load_schools() -> pd.DataFrame:
     if SCHOOL_CACHE.exists():
         return pd.read_csv(SCHOOL_CACHE)
 
-    query = r"""
-    [out:json][timeout:120];
-    area["ISO3166-2"="DE-BY"]->.searchArea;
-    (
-      node["amenity"="school"]["name"~"Gymnasium"](area.searchArea);
-      way["amenity"="school"]["name"~"Gymnasium"](area.searchArea);
-      relation["amenity"="school"]["name"~"Gymnasium"](area.searchArea);
-    );
-    out center tags;
-    """
-
-    resp = requests.post(OVERPASS_URL, data={"data": query})
-    resp.raise_for_status()
-    elements = resp.json()["elements"]
-
-    rec: list[dict] = []
-    for el in elements:
+    query = dedent("""
+        [out:json][timeout:120];
+        area["ISO3166-2"="DE-BY"]->.searchArea;
+        (
+          node["amenity"="school"](area.searchArea);
+          way["amenity"="school"](area.searchArea);
+          relation["amenity"="school"](area.searchArea);
+        );
+        out center tags;
+    """)
+    data = requests.post(OVERPASS_URL, data={"data": query}).json()
+    rows = []
+    for el in data["elements"]:
         lat = el.get("lat") or el.get("center", {}).get("lat")
         lon = el.get("lon") or el.get("center", {}).get("lon")
         name = el.get("tags", {}).get("name")
         if lat and lon and name:
-            rec.append({
-                "name": re.sub(r"\s+Gymnasium$", " Gymnasium", name),
-                "lat": lat,
-                "lon": lon,
-            })
-
-    df = pd.DataFrame(rec).drop_duplicates()
+            rows.append({"name": name, "lat": lat, "lon": lon, "type": school_type_from_name(name)})
+    df = pd.DataFrame(rows).drop_duplicates()
     df.to_csv(SCHOOL_CACHE, index=False)
     return df
 
+def load_or_init_db(schools: pd.DataFrame) -> dict[str, dict]:
+    if SPACE_FILE.exists():
+        return json.loads(SPACE_FILE.read_text())
+    # create skeleton with every school key mapping to {}
+    db = {row["name"]: {} for _, row in schools.iterrows()}
+    Path(SPACE_FILE).write_text(json.dumps(db, ensure_ascii=False, indent=2))
+    return db
 
-def load_makerspaces() -> dict[str, list[dict]]:
-    return json.loads(SPACE_FILE.read_text()) if SPACE_FILE.exists() else {}
+###############################################################################
+# UI
+###############################################################################
+st.set_page_config(page_title="Makerspaces Bayern", layout="wide")
 
-
-def save_makerspaces(db: dict[str, list[dict]]):
-    SPACE_FILE.write_text(json.dumps(db, indent=2, ensure_ascii=False))
-
-
-# -----------------------------------------------------------------------------
-# UI LAYER
-# -----------------------------------------------------------------------------
-
-st.set_page_config(page_title="Makerspaces an bayerischen Gymnasien", layout="wide")
-
-st.title("🛠️ Makerspaces an bayerischen Gymnasien")
-st.caption("OpenStreetMap-Datenbasis · Erstellt mit Streamlit & Folium · Stand: automatisch aktuell")
-
+st.title("🛠️ Makerspaces an Schulen in Bayern")
 schools_df = load_schools()
-makerspaces_db = load_makerspaces()
+db = load_or_init_db(schools_df)
 
-# --- Sidebar form -------------------------------------------------------------
+# Sidebar
 with st.sidebar:
-    st.header("Makerspace erfassen / bearbeiten")
+    st.header("Filter & Verwaltung")
+    sel_types = st.multiselect("Schularten", options=sorted(schools_df["type"].unique()),
+                               default=sorted(schools_df["type"].unique()))
+    filtered_df = schools_df[schools_df["type"].isin(sel_types)]
 
-    chosen_school = st.selectbox("Gymnasium auswählen", schools_df["name"].sort_values())
-    current_entry = makerspaces_db.get(chosen_school, [{}])[-1]  # letztes / einziges
+    st.divider()
+    st.subheader("Makerspace bearbeiten")
+    school = st.selectbox("Schule wählen", filtered_df["name"].sort_values())
+    entry = db.get(school, {})
 
-    # Default‑Werte vorbereiten ----------------------------------------------
-    default_space = current_entry.get("space_name", "")
-    default_tools = ", ".join(current_entry.get("tools", [])) if current_entry else ""
-    default_contact = current_entry.get("contact", "")
+    space_name = st.text_input("Makerspace-Name", value=entry.get("space_name", ""))
+    tools_str = st.text_area("Werkzeuge (kommagetrennt)", value=", ".join(entry.get("tools", [])), height=200)
+    contact = st.text_input("Ansprechpartner", value=entry.get("contact", ""))
+    email = st.text_input("E-Mail", value=entry.get("email", ""))
+    website = st.text_input("Webseite", value=entry.get("website", ""))
 
-    # Eingabefelder -----------------------------------------------------------
-    space_name = st.text_input("Bezeichnung des Makerspaces", value=default_space)
-    tools_str = st.text_area("Werkzeuge (kommagetrennt)", value=default_tools)
-    contact_name = st.text_input("Ansprechpartner (Name)", value=default_contact)
-
-    if st.button("Speichern / Aktualisieren", type="primary"):
-        if not space_name.strip():
-            st.error("Bitte einen Namen für den Makerspace angeben.")
-        else:
-            new_entry = {
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Speichern"):
+            db[school] = {
                 "space_name": space_name.strip(),
                 "tools": [t.strip() for t in tools_str.split(",") if t.strip()],
-                "contact": contact_name.strip(),
+                "contact": contact.strip(),
+                "email": email.strip(),
+                "website": website.strip()
             }
-            makerspaces_db[chosen_school] = [new_entry]  # ersetze / lege an
-            save_makerspaces(makerspaces_db)
-            st.success("Eintrag gespeichert!")
+            SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
+            st.success("Gespeichert!")
+    with col2:
+        if entry:
+            pwd = st.text_input("Passwort zum Löschen", type="password")
+            if st.button("Löschen") and pwd == ADMIN_PASSWORD:
+                db[school] = {}
+                SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
+                st.success("Gelöscht")
 
-# --- Map ----------------------------------------------------------------------
-
-def make_map(df: pd.DataFrame, spaces: dict[str, list[dict]]) -> folium.Map:
-    m = folium.Map(location=[48.97, 11.5], zoom_start=7, tiles="OpenStreetMap")
-
-    # Cluster mit farbiger Bubble (rot/​grün) ----------------------------------
+###############################################################################
+# Map
+###############################################################################
+def build_map(df: pd.DataFrame, spaces: dict[str, dict]) -> folium.Map:
+    m = folium.Map(location=[48.97, 11.5], zoom_start=7)
     cluster = MarkerCluster(
-        name="Gymnasien",
         options={"showCoverageOnHover": False},
         icon_create_function="""
-        function (cluster) {
+        function(cluster){
             const count = cluster.getChildCount();
-            const children = cluster.getAllChildMarkers();
-            let hasSpace = false;
-            for (let i = 0; i < children.length; i++) {
-                if (children[i].options.icon.options.markerColor === 'green') {
-                    hasSpace = true; break; }
-            }
-            const color = hasSpace ? 'green' : 'red';
-            return L.divIcon({
-                html: `<div style='background-color:${color};border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:white;font-weight:bold;'>${count}</div>`
-            });
-        }
-        """,
+            const green = cluster.getAllChildMarkers().some(m=>m.options.icon.options.markerColor==='green');
+            const color = green?'green':'red';
+            return L.divIcon({html:`<div style='background:${color};border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:white;'>${count}</div>`});
+        }"""
     ).add_to(m)
-
-    for _, row in df.iterrows():
-        entries = spaces.get(row["name"], [])
-        has_space = bool(entries)
-        icon_color = "green" if has_space else "red"
-
-        popup_parts = [f"<b>{row['name']}</b>"]
-        if entries and entries[0].get("contact"):
-            popup_parts.append(f"<br><b>Ansprechpartner:</b> {entries[0]['contact']}")
-
-        if has_space:
-            for e in entries:
-                tools = ", ".join(e["tools"]) if e["tools"] else "–"
-                popup_parts.append(
-                    "<hr style='margin:4px 0;'>" +
-                    f"<i>{e['space_name']}</i><br>Werkzeuge: {tools}"
-                )
+    for _, r in df.iterrows():
+        e = spaces.get(r["name"], {})
+        color = "green" if e.get("space_name") else "red"
+        popup = f"<b>{r['name']}</b><br><i>{r['type']}</i>"
+        if e.get("space_name"):
+            if e.get("contact"): popup += f"<br><b>Kontakt:</b> {e['contact']}"
+            if e.get("email"): popup += f"<br><b>Email:</b> <a href='mailto:{e['email']}'>{e['email']}</a>"
+            if e.get("website"): popup += f"<br><b>Web:</b> <a href='{e['website']}' target='_blank'>{e['website']}</a>"
+            tools = ", ".join(e.get("tools", [])) or "–"
+            popup += f"<hr style='margin:4px 0;'><i>{e['space_name']}</i><br>Werkzeuge: {tools}"
         else:
-            popup_parts.append("<br><i>Kein Makerspace eingetragen.</i>")
-
-        folium.Marker(
-            location=[row["lat"], row["lon"]],
-            popup=folium.Popup("".join(popup_parts), max_width=300),
-            icon=folium.Icon(color=icon_color, icon="wrench", prefix="fa"),
-        ).add_to(cluster)
-
-    Fullscreen(position="topright").add_to(m)
-    LocateControl(auto_start=False).add_to(m)
+            popup += "<br><i>Kein Makerspace eingetragen.</i>"
+        folium.Marker([r["lat"], r["lon"]],
+                      icon=folium.Icon(color=color, icon="wrench", prefix="fa"),
+                      popup=folium.Popup(popup, max_width=300)).add_to(cluster)
+    Fullscreen().add_to(m)
+    LocateControl().add_to(m)
     return m
 
-
-st.markdown("### Interaktive Karte der Gymnasien")
-st_folium(make_map(schools_df, makerspaces_db), width=1280, height=650)
-
-st.caption("Datenquelle: © OpenStreetMap-Mitwirkende 2025 · Script unter MIT‑Lizenz")
+st.markdown("### Karte")
+st_folium(build_map(filtered_df, db), width=1280, height=650)

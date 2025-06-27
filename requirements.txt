@@ -3,3 +3,4 @@ folium>=0.16
 streamlit-folium>=0.15
 pandas>=2.2
 requests>=2.32
+python-dotenv>=1.0
