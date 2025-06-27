@@ -1,9 +1,13 @@
 """
-Streamlit‑App: Makerspaces an Bayerischen Schulen – Resilience Fix (2025‑06‑29)
------------------------------------------------------------------------------
-* **Fehler behoben:** Wenn bereits eine ältere `schools_bavaria.csv` ohne Spalte `type` existierte, schlug der Zugriff (`KeyError: 'type'`) fehl.  
-  → `load_schools()` prüft nun den Cache und ergänzt die Spalte bei Bedarf automatisch.
-* Keine weiteren Veränderungen am Verhalten.
+Streamlit‑App · Makerspaces an Bayerischen Schulen  
+Version 2025‑07‑01 — FastMarkerCluster + Session‑Caching
+------------------------------------------------------
+* **FastMarkerCluster** rendert Marker stückweise (Performance‑Boost)
+* **Session‑Cache**: Die Karte wird nur neu gebaut, wenn sich
+  - der Schulart‑Filter  **oder**  
+  - die Makerspace‑Datenbank ändert.
+  Dadurch bleibt das UI reaktiv, ohne bei jeder Texteingabe
+  tausende Marker neu zu zeichnen.
 """
 from __future__ import annotations
 
@@ -11,13 +15,14 @@ from pathlib import Path
 import json
 import os
 import re
+import hashlib
 from textwrap import dedent
 
 import pandas as pd
 import requests
 import streamlit as st
 import folium
-from folium.plugins import MarkerCluster, Fullscreen, LocateControl
+from folium.plugins import FastMarkerCluster, Fullscreen, LocateControl
 from streamlit_folium import st_folium
 
 ###############################################################################
@@ -26,19 +31,13 @@ from streamlit_folium import st_folium
 SCHOOL_CACHE = Path("schools_bavaria.csv")
 SPACE_FILE = Path("makerspaces.json")
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
-# --- Passwortbezug robust gestalten -----------------------------------------
-# ------------------------------------------------------------------
-# Admin-Passwort robust ermitteln
-#   1) Umgebungsvariable  MAKERSPACE_ADMIN_PW
-#   2) optional  .streamlit/secrets.toml   makerspace_admin_pw = "…"
-#   3) Fallback  "changeme"
-# ------------------------------------------------------------------
-_env_pw = os.getenv("MAKERSPACE_ADMIN_PW")       # höchste Priorität
+
+# --- Admin‑Passwort robust ---------------------------------------------------
+_env_pw = os.getenv("MAKERSPACE_ADMIN_PW")
 try:
-    _secret_pw = st.secrets["makerspace_admin_pw"]   # nur falls secrets.toml existiert
+    _secret_pw = st.secrets["makerspace_admin_pw"]
 except Exception:
     _secret_pw = None
-
 ADMIN_PASSWORD = _env_pw or _secret_pw or "changeme"
 
 ###############################################################################
@@ -63,15 +62,13 @@ def school_type_from_name(name: str) -> str:
     return "Sonstige"
 
 ###############################################################################
-# DATA
+# DATA LAYER
 ###############################################################################
 
 @st.cache_data(show_spinner="📡 Lade Schulen …")
 def load_schools() -> pd.DataFrame:
-    """Lädt Schulen aus Cache oder Overpass und sorgt dafür, dass die Spalte 'type' immer vorhanden ist."""
     if SCHOOL_CACHE.exists():
         df = pd.read_csv(SCHOOL_CACHE)
-        # ► Cache von alten Versionen ohne 'type' reparieren
         if "type" not in df.columns:
             df["type"] = df["name"].apply(school_type_from_name)
             df.to_csv(SCHOOL_CACHE, index=False)
@@ -89,77 +86,69 @@ def load_schools() -> pd.DataFrame:
         out center tags;
         """
     )
-    elements = requests.post(OVERPASS_URL, data={"data": query}).json()["elements"]
-    rows = []
-    for el in elements:
-        lat = el.get("lat") or el.get("center", {}).get("lat")
-        lon = el.get("lon") or el.get("center", {}).get("lon")
-        name = el.get("tags", {}).get("name")
-        if lat and lon and name:
-            rows.append({"name": name, "lat": lat, "lon": lon, "type": school_type_from_name(name)})
+    els = requests.post(OVERPASS_URL, data={"data": query}).json()["elements"]
+    rows = [
+        {
+            "name": el["tags"].get("name"),
+            "lat": el.get("lat") or el["center"]["lat"],
+            "lon": el.get("lon") or el["center"]["lon"],
+            "type": school_type_from_name(el["tags"].get("name", "")),
+        }
+        for el in els
+        if el.get("lat") or el.get("center")
+    ]
     df = pd.DataFrame(rows).drop_duplicates()
     df.to_csv(SCHOOL_CACHE, index=False)
     return df
 
 
 def load_or_init_db(schools: pd.DataFrame) -> dict[str, dict]:
-    """Stellt sicher, dass *jede* Schule im Makerspace-DB-Dict vertreten ist.
-
-    * liest bestehende `makerspaces.json` (altes oder neues Schema)
-    * migriert alte Listeneinträge → Dict (erster Eintrag)
-    * ergänzt **fehlende Schul-Schlüssel** mit `{}`
-    * speichert nur, falls Änderungen vorgenommen wurden
-    """
-    changed = False
     if SPACE_FILE.exists():
         raw = json.loads(SPACE_FILE.read_text())
     else:
         raw = {}
-        changed = True
-
-    db: dict[str, dict] = {}
-
-    # 1) Migration alt → neu
+    db, changed = {}, False
     for k, v in raw.items():
         if isinstance(v, list):
             db[k] = v[0] if v else {}
-            if isinstance(v, list):
-                changed = True
+            changed = True
         elif isinstance(v, dict):
             db[k] = v
         else:
             db[k] = {}
-
-    # 2) Fehlende Schulen ergänzen
-    for name in schools["name"]:
-        if name not in db:
-            db[name] = {}
+    for n in schools["name"]:
+        if n not in db:
+            db[n] = {}
             changed = True
-
     if changed:
         SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
-
     return db
 
 ###############################################################################
-# UI / MAP (unverändert gegenüber Vorversion)
+# UI
 ###############################################################################
 
 st.set_page_config(page_title="Makerspaces Bayern", layout="wide")
 
 st.title("🛠️ Makerspaces an Schulen in Bayern")
+
 schools_df = load_schools()
 db = load_or_init_db(schools_df)
 
+# ---------------- Sidebar ----------------------------------------------------
 with st.sidebar:
     st.header("Filter & Verwaltung")
-    sel_types = st.multiselect("Schularten", options=sorted(schools_df["type"].unique()),
-                               default=sorted(schools_df["type"].unique()))
-    filtered_df = schools_df[schools_df["type"].isin(sel_types)]
+    sel_types = st.multiselect(
+        "Schularten",
+        options=sorted(schools_df["type"].unique()),
+        default=[],
+        help="Wähle eine oder mehrere Schularten für die Karte.",
+    )
+    filtered_df = schools_df[schools_df["type"].isin(sel_types)] if sel_types else schools_df.iloc[0:0]
 
     st.divider()
     st.subheader("Makerspace bearbeiten")
-    school = st.selectbox("Schule wählen", filtered_df["name"].sort_values())
+    school = st.selectbox("Schule wählen", filtered_df["name"].sort_values() if not filtered_df.empty else schools_df["name"].sort_values())
     entry = db.get(school, {})
 
     space_name = st.text_input("Makerspace-Name", value=entry.get("space_name", ""))
@@ -179,47 +168,66 @@ with st.sidebar:
                 "website": website.strip(),
             }
             SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
+            st.session_state.pop("map_key", None)  # ↻ Karte neu zeichnen
             st.success("Gespeichert!")
     with col2:
-        if entry and entry.get("space_name"):
+        if entry.get("space_name"):
             pwd = st.text_input("Passwort zum Löschen", type="password")
             if st.button("Löschen") and pwd == ADMIN_PASSWORD:
                 db[school] = {}
                 SPACE_FILE.write_text(json.dumps(db, ensure_ascii=False, indent=2))
+                st.session_state.pop("map_key", None)
                 st.success("Gelöscht")
 
-# ----- Karte -----------------------------------------------------------------
+###############################################################################
+# Map & Session‑Cache
+###############################################################################
 
 def build_map(df: pd.DataFrame, spaces: dict[str, dict]) -> folium.Map:
     m = folium.Map(location=[48.97, 11.5], zoom_start=7)
-    cluster = MarkerCluster(
-        options={"showCoverageOnHover": False},
-        icon_create_function="""
-        function(cluster){
-            const count = cluster.getChildCount();
-            const green = cluster.getAllChildMarkers().some(m=>m.options.icon.options.markerColor==='green');
-            const color = green?'green':'red';
-            return L.divIcon({html:`<div style='background:${color};border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:white;'>${count}</div>`});
-        }"""
-    ).add_to(m)
+    data = []
     for _, r in df.iterrows():
         e = spaces.get(r["name"], {})
         color = "green" if e.get("space_name") else "red"
         popup = f"<b>{r['name']}</b><br><i>{r['type']}</i>"
         if e.get("space_name"):
-            if e.get("contact"): popup += f"<br><b>Kontakt:</b> {e['contact']}"
-            if e.get("email"): popup += f"<br><b>Email:</b> <a href='mailto:{e['email']}'>{e['email']}</a>"
-            if e.get("website"): popup += f"<br><b>Web:</b> <a href='{e['website']}' target='_blank'>{e['website']}</a>"
+            if e.get("contact"):
+                popup += f"<br><b>Kontakt:</b> {e['contact']}"
+            if e.get("email"):
+                popup += f"<br><b>Email:</b> <a href='mailto:{e['email']}'>{e['email']}</a>"
+            if e.get("website"):
+                popup += f"<br><b>Web:</b> <a href='{e['website']}' target='_blank'>{e['website']}</a>"
             tools = ", ".join(e.get("tools", [])) or "–"
             popup += f"<hr style='margin:4px 0;'><i>{e['space_name']}</i><br>Werkzeuge: {tools}"
         else:
             popup += "<br><i>Kein Makerspace eingetragen.</i>"
-        folium.Marker([r["lat"], r["lon"]],
-                      icon=folium.Icon(color=color, icon="wrench", prefix="fa"),
-                      popup=folium.Popup(popup, max_width=300)).add_to(cluster)
+        data.append([r["lat"], r["lon"], color, popup])
+
+    callback = """
+    function(row){
+        const marker = L.circleMarker([row[0], row[1]], {radius:6,color:row[2],fill:true,fillColor:row[2],fillOpacity:0.9});
+        if(row[3]){marker.bindPopup(row[3]);}
+        return marker;}
+    """
+    FastMarkerCluster(data=data, callback=callback).add_to(m)
     Fullscreen().add_to(m)
     LocateControl().add_to(m)
     return m
 
+# ------------- Caching‑Logik -------------------------------------------------
+
+def current_map_key(df: pd.DataFrame) -> str:
+    """Hash über Schulart‑Filter und letzte Änderungszeit von makerspaces.json"""
+    filter_hash = hashlib.md5(pd.util.hash_pandas_object(df["name"], index=False).values).hexdigest()
+    file_mtime = os.path.getmtime(SPACE_FILE) if SPACE_FILE.exists() else 0
+    return f"{filter_hash}_{file_mtime}"
+
 st.markdown("### Karte")
-st_folium(build_map(filtered_df, db), width=1280, height=650)
+if not sel_types:  # keine Auswahl ⇒ Hinweis
+    st.info("Bitte mindestens eine Schulart wählen.")
+else:
+    key = current_map_key(filtered_df)
+    if st.session_state.get("map_key") != key:
+        st.session_state["map_obj"] = build_map(filtered_df, db)
+        st.session_state["map_key"] = key
+    st_folium(st.session_state["map_obj"], width=1280, height=650)
