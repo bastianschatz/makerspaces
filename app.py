@@ -188,7 +188,8 @@ def build_map(df: pd.DataFrame, spaces: dict[str, dict]) -> folium.Map:
     data = []
     for _, r in df.iterrows():
         e = spaces.get(r["name"], {})
-        color = "green" if e.get("space_name") else "red"
+        has_space = bool(e and e.get("space_name"))
+        color = "green" if has_space else "red"
         popup = f"<b>{r['name']}</b><br><i>{r['type']}</i>"
         if e.get("space_name"):
             if e.get("contact"):
