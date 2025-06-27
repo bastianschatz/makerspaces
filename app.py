@@ -215,4 +215,4 @@ def build_map(df: pd.DataFrame, spaces: dict[str, dict]) -> folium.Map:
             if info.get("email"):
                 popup_parts.append(f"<br><b>Email:</b> <a href='mailto:{info['email']}'>{info['email']}</a>")
             if info.get("website"):
-                popup_parts.append(f"<br><b>Web:</b> <a href='{info['website']}' target='_blank'>{info['website']}</
+                popup_parts.append(f"<br><b>Web:</b> <a href='{info['website']}' target='_blank'>{info['website']}</a>")
