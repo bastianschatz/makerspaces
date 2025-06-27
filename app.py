@@ -22,7 +22,7 @@ import pandas as pd
 import requests
 import streamlit as st
 import folium
-from folium.plugins import FastMarkerCluster, Fullscreen, LocateControl
+from folium.plugins import MarkerCluster, Fullscreen, LocateControl
 from streamlit_folium import st_folium
 
 ###############################################################################
@@ -184,14 +184,28 @@ with st.sidebar:
 ###############################################################################
 
 def build_map(df: pd.DataFrame, spaces: dict[str, dict]) -> folium.Map:
+    """MarkerCluster mit chunkedLoading & farbiger Cluster-Bubble."""
     m = folium.Map(location=[48.97, 11.5], zoom_start=7)
-    data = []
+
+    icon_create = """
+    function(cluster){
+        const has = cluster.getAllChildMarkers().some(m=>m.options.hasSpace);
+        const count = cluster.getChildCount();
+        const color = has ? 'green' : 'red';
+        return L.divIcon({html:`<div style='background:${color};border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;color:white;'>${count}</div>`});
+    }"""
+
+    cluster = MarkerCluster(
+        options={"showCoverageOnHover": False, "chunkedLoading": True},
+        icon_create_function=icon_create
+    ).add_to(m)
+
     for _, r in df.iterrows():
         e = spaces.get(r["name"], {})
-        has_space = bool(e and e.get("space_name"))
+        has_space = bool(e.get("space_name"))
         color = "green" if has_space else "red"
         popup = f"<b>{r['name']}</b><br><i>{r['type']}</i>"
-        if e.get("space_name"):
+        if has_space:
             if e.get("contact"):
                 popup += f"<br><b>Kontakt:</b> {e['contact']}"
             if e.get("email"):
@@ -202,29 +216,31 @@ def build_map(df: pd.DataFrame, spaces: dict[str, dict]) -> folium.Map:
             popup += f"<hr style='margin:4px 0;'><i>{e['space_name']}</i><br>Werkzeuge: {tools}"
         else:
             popup += "<br><i>Kein Makerspace eingetragen.</i>"
-        data.append([r["lat"], r["lon"], color, popup])
+        marker = folium.CircleMarker(
+            location=[r["lat"], r["lon"]],
+            radius=6,
+            color=color,
+            fill=True,
+            fillColor=color,
+            fillOpacity=0.9,
+        )
+        marker.options.update({"hasSpace": has_space})
+        marker.add_child(folium.Popup(popup, max_width=300))
+        marker.add_to(cluster)
 
-    callback = """
-    function(row){
-        const marker = L.circleMarker([row[0], row[1]], {radius:6,color:row[2],fill:true,fillColor:row[2],fillOpacity:0.9});
-        if(row[3]){marker.bindPopup(row[3]);}
-        return marker;}
-    """
-    FastMarkerCluster(data=data, callback=callback).add_to(m)
     Fullscreen().add_to(m)
     LocateControl().add_to(m)
     return m
 
-# ------------- Caching‑Logik -------------------------------------------------
+# ------------- Caching-Logik -------------------------------------------------
 
 def current_map_key(df: pd.DataFrame) -> str:
-    """Hash über Schulart‑Filter und letzte Änderungszeit von makerspaces.json"""
     filter_hash = hashlib.md5(pd.util.hash_pandas_object(df["name"], index=False).values).hexdigest()
     file_mtime = os.path.getmtime(SPACE_FILE) if SPACE_FILE.exists() else 0
     return f"{filter_hash}_{file_mtime}"
 
 st.markdown("### Karte")
-if not sel_types:  # keine Auswahl ⇒ Hinweis
+if not sel_types:
     st.info("Bitte mindestens eine Schulart wählen.")
 else:
     key = current_map_key(filtered_df)
@@ -232,3 +248,4 @@ else:
         st.session_state["map_obj"] = build_map(filtered_df, db)
         st.session_state["map_key"] = key
     st_folium(st.session_state["map_obj"], width=1280, height=650)
+(st.session_state["map_obj"], width=1280, height=650)
