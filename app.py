@@ -14,9 +14,11 @@ from streamlit_folium import st_folium
 # -------------------------------------------------------------------
 # Konfiguration
 # -------------------------------------------------------------------
-BASE_DIR       = Path(__file__).parent
-SCHOOL_CACHE   = BASE_DIR / "schools_bavaria.csv"
-SPACE_FILE     = BASE_DIR / "makerspaces.json"
+PERSIST_DIR     = Path("/mount/src")
+
+SCHOOL_CACHE    = PERSIST_DIR / "schools_bavaria.csv"
+SPACE_FILE      = PERSIST_DIR / "makerspaces.json"
+MEDIEN_CACHE    = PERSIST_DIR / "medienzentren.csv"
 OVERPASS_URL   = "https://overpass-api.de/api/interpreter"
 
 # Passwort (Env > secrets.toml > Fallback)
